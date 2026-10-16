@@ -1,0 +1,85 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+env:
+  SOURCE_DATE_EPOCH: "315532800"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install "poetry>=2.1,<3"
+      - run: poetry install --no-interaction
+      - run: poetry run pytest --junitxml=report.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-report
+          path: report.xml
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - id: meta
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="main_${GITHUB_SHA::7}"
+          fi
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+          build-args: SOURCE_DATE_EPOCH=315532800
+          provenance: false
+          sbom: false
+          outputs: type=registry,rewrite-timestamp=true
+
+  deploy:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: [self-hosted, deploy]
+    environment:
+      name: production
+      url: http://localhost:8088
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy with Ansible
+        working-directory: deploy
+        env:
+          ANSIBLE_VAULT_KEY: ${{ secrets.ANSIBLE_VAULT_KEY }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          ANSIBLE_NOCOLOR: "1"
+        run: |
+          ansible-playbook audit-svc.play.yml \
+            --vault-password-file ./vault-pass.sh \
+            -e "audit_svc_image_repo=ghcr.io/${GITHUB_REPOSITORY,,}" \
+            -e "audit_svc_image_tag=${GITHUB_REF_NAME}"
