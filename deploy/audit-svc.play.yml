@@ -175,6 +175,9 @@
       ansible.builtin.set_fact:
         audit_svc_ip: "{{ audit_svc_info.container.NetworkSettings.Networks[audit_network].IPAddress }}"
 
+    - name: Apply pending config to the running service
+      ansible.builtin.meta: flush_handlers
+
     - name: Wait until audit-svc is healthy
       ansible.builtin.uri:
         url: "http://{{ audit_svc_ip }}:8080/healthz"
@@ -236,6 +239,9 @@
         status_code: 200
         use_proxy: false
       register: reload_result
+      until: reload_result.status | default(0) == 200
+      retries: 30
+      delay: 2
 
     - name: Reload nginx
       community.docker.docker_container_exec:
